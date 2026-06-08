@@ -127,3 +127,7 @@ Active session hits 250k tokens
   → Kill old Claude, restart with --resume <new_session_id>
   → Old session marked as .rotated_* (never picked up again)
 ```
+
+## Caveat
+
+This tool relies on Claude Code's internal session JSONL format, which is **undocumented and may change with any update**. The field structure, UUID chaining, and `--resume` behavior are all reverse-engineered from the current implementation. If a Claude Code update breaks rotation, you'll likely just need to adjust the JSONL fields in `forge_session()` to match the new format.
