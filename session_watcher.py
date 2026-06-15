@@ -29,8 +29,26 @@ SESSIONS_DIR = os.environ.get(
     os.path.expanduser(f"~/.claude/projects/{PROJECT_DIR.replace('/', '-').lstrip('-')}"),
 )
 
-TOKEN_THRESHOLD = int(os.environ.get("WATCHER_TOKEN_THRESHOLD", 250_000))
-KEEP_TOKEN_THRESHOLD = int(os.environ.get("WATCHER_KEEP_TOKEN_THRESHOLD", 200_000))
+# --- Threshold presets (two-mode switch) ---
+# low  = 日常档（默认，沿用现有 env，现网是 150k/100k）
+# high = 大上下文档（给 1M context 用，默认 800k/600k）
+# 用 .threshold_mode 文件热切换（内容写 "low" / "high"），watcher 每轮实时读，不用重启。
+TOKEN_THRESHOLD_LOW = int(os.environ.get("WATCHER_TOKEN_THRESHOLD", 250_000))
+KEEP_TOKEN_THRESHOLD_LOW = int(os.environ.get("WATCHER_KEEP_TOKEN_THRESHOLD", 200_000))
+TOKEN_THRESHOLD_HIGH = int(os.environ.get("WATCHER_TOKEN_THRESHOLD_HIGH", 800_000))
+KEEP_TOKEN_THRESHOLD_HIGH = int(os.environ.get("WATCHER_KEEP_TOKEN_THRESHOLD_HIGH", 600_000))
+
+MODE_FILE = os.environ.get(
+    "WATCHER_MODE_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".threshold_mode"),
+)
+DEFAULT_MODE = (os.environ.get("WATCHER_MODE", "low").strip().lower() or "low")
+
+# Active values (updated live from MODE_FILE each loop). split_messages() reads
+# KEEP_TOKEN_THRESHOLD as a global, so updating these in place is enough.
+TOKEN_THRESHOLD = TOKEN_THRESHOLD_LOW
+KEEP_TOKEN_THRESHOLD = KEEP_TOKEN_THRESHOLD_LOW
+
 CHECK_INTERVAL = int(os.environ.get("WATCHER_CHECK_INTERVAL", 30))
 TMUX_SESSION = os.environ.get("WATCHER_TMUX_SESSION", "cc")
 CLAUDE_FLAGS = os.environ.get("WATCHER_CLAUDE_FLAGS", "--dangerously-skip-permissions").split()
@@ -65,6 +83,31 @@ INJECT_ASSISTANT_MESSAGE = os.environ.get(
 )
 
 ROTATED_SESSION_PREFIXES = set()
+
+
+def read_mode():
+    """Read the live threshold mode from MODE_FILE ('low'/'high'). Falls back to DEFAULT_MODE."""
+    mode = DEFAULT_MODE
+    try:
+        if os.path.exists(MODE_FILE):
+            v = open(MODE_FILE, "r", encoding="utf-8").read().strip().lower()
+            if v in ("low", "high"):
+                mode = v
+    except Exception as e:
+        log.warning(f"read_mode failed: {e}")
+    return mode if mode in ("low", "high") else "low"
+
+
+def apply_mode(mode):
+    """Switch the active TOKEN_THRESHOLD / KEEP_TOKEN_THRESHOLD to the chosen preset."""
+    global TOKEN_THRESHOLD, KEEP_TOKEN_THRESHOLD
+    if mode == "high":
+        TOKEN_THRESHOLD = TOKEN_THRESHOLD_HIGH
+        KEEP_TOKEN_THRESHOLD = KEEP_TOKEN_THRESHOLD_HIGH
+    else:
+        TOKEN_THRESHOLD = TOKEN_THRESHOLD_LOW
+        KEEP_TOKEN_THRESHOLD = KEEP_TOKEN_THRESHOLD_LOW
+    return TOKEN_THRESHOLD, KEEP_TOKEN_THRESHOLD
 
 
 def load_rotated_markers():
@@ -480,12 +523,25 @@ async def rotate_session(session_file):
 
 async def main():
     load_rotated_markers()
+    current_mode = read_mode()
+    apply_mode(current_mode)
     log.info(
-        f"Session watcher started (threshold={TOKEN_THRESHOLD:,}, "
-        f"keep_at={KEEP_TOKEN_THRESHOLD:,}, check_interval={CHECK_INTERVAL}s)"
+        f"Session watcher started (mode={current_mode}, threshold={TOKEN_THRESHOLD:,}, "
+        f"keep_at={KEEP_TOKEN_THRESHOLD:,}, check_interval={CHECK_INTERVAL}s) "
+        f"[presets low={TOKEN_THRESHOLD_LOW:,}/{KEEP_TOKEN_THRESHOLD_LOW:,} "
+        f"high={TOKEN_THRESHOLD_HIGH:,}/{KEEP_TOKEN_THRESHOLD_HIGH:,}, flip via {MODE_FILE}]"
     )
 
     while True:
+        # Live mode switch: re-read each loop so flipping .threshold_mode takes effect without restart.
+        mode = read_mode()
+        if mode != current_mode:
+            apply_mode(mode)
+            current_mode = mode
+            log.info(
+                f"threshold mode → {mode} (threshold={TOKEN_THRESHOLD:,}, keep_at={KEEP_TOKEN_THRESHOLD:,})"
+            )
+
         session_file = find_active_session()
         if not session_file:
             log.debug("No active session found")
