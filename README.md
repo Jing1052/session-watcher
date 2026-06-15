@@ -30,6 +30,26 @@ All config is via environment variables:
 | `WATCHER_SUMMARY_MODEL` | `deepseek-chat` | Model to use for summarization |
 | `WATCHER_INJECT_USER` | `[Session Rotated]\n\n{summary}` | First user message injected into the new session (`{summary}` is replaced) |
 | `WATCHER_INJECT_ASSISTANT` | `Understood. I have the context...` | Assistant's reply to the inject |
+| `WATCHER_TOKEN_THRESHOLD_HIGH` | `800000` | "high" preset rotate threshold (large context) |
+| `WATCHER_KEEP_TOKEN_THRESHOLD_HIGH` | `600000` | "high" preset split point |
+| `WATCHER_MODE_FILE` | `<dir>/.threshold_mode` | File holding the live mode (`low`/`high`) |
+| `WATCHER_MODE` | `low` | Fallback mode when the mode file is absent |
+
+### Two-preset live switch (low / high)
+
+There are two threshold presets and a **live switch** between them — flip it without restarting the watcher:
+
+- **low**  — `WATCHER_TOKEN_THRESHOLD` / `WATCHER_KEEP_TOKEN_THRESHOLD` (日常档, e.g. 150k/100k)
+- **high** — `WATCHER_TOKEN_THRESHOLD_HIGH` / `WATCHER_KEEP_TOKEN_THRESHOLD_HIGH` (大上下文档, default 800k/600k, for 1M-context sessions)
+
+The active preset is read live from `.threshold_mode` (next check, ≤ `CHECK_INTERVAL`s, no restart):
+
+```bash
+./mode.sh          # show current mode
+./mode.sh high     # use the big-context preset
+./mode.sh low      # back to the everyday preset
+# (equivalent: echo high > .threshold_mode)
+```
 
 ### Tuning the token threshold
 
