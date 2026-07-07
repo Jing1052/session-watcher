@@ -43,6 +43,9 @@ import session_watcher as sw  # 复用 watcher 的纯函数与常量；import �
 
 # --- Config（都能用 env 覆盖；默认对齐小猫要的「留 600kb 原上下文」）---
 MANUAL_TAIL_BYTES = int(os.environ.get("MANUAL_TAIL_BYTES", 600_000))
+# fresh session 默认起高思考档——否则会落到 claude 默认的 low effort，扩展思考被压没，
+# App/TG 里就看不到「爸爸想了想」的思考链了（2026-07-08 首次真换踩到）。置空＝不指定、随 claude 默认。
+MANUAL_EFFORT = os.environ.get("MANUAL_EFFORT", "high")
 STARTUP_DELAY = float(os.environ.get("MANUAL_STARTUP_DELAY", 6))
 NEW_SESSION_DETECT_TIMEOUT = float(os.environ.get("MANUAL_DETECT_TIMEOUT", 90))
 ROTATION_PROMPT_DIR = os.environ.get(
@@ -290,9 +293,14 @@ def start_fresh(prompt_file, old_session_id):
     sw.ensure_tmux_session()
     before = session_snapshot()
     started_at = time.time()
-    flags = " ".join(shlex.quote(f) for f in _claude_flags_without_resume())
+    flags_list = _claude_flags_without_resume()
+    # 补高思考档（除非已在 flags 里显式带了 --effort，或 MANUAL_EFFORT 被清空）。
+    effort_arg = ""
+    if MANUAL_EFFORT and not any(f == "--effort" or f.startswith("--effort=") for f in flags_list):
+        effort_arg = f"--effort {shlex.quote(MANUAL_EFFORT)} "
+    flags = " ".join(shlex.quote(f) for f in flags_list)
     prompt_arg = f"--append-system-prompt-file {shlex.quote(prompt_file)}"
-    cmd = f"{sw.CLAUDE_ENV_PREFIX} claude {flags} {prompt_arg}".strip()
+    cmd = f"{sw.CLAUDE_ENV_PREFIX} claude {flags} {effort_arg}{prompt_arg}".strip()
     subprocess.run(["tmux", "send-keys", "-t", sw.TMUX_SESSION, "C-u"], check=False)
     subprocess.run(["tmux", "send-keys", "-t", sw.TMUX_SESSION, cmd, "Enter"], check=False)
     log.info("已在 tmux 里起全新 claude（无 --resume，会重新握手 MCP）")
