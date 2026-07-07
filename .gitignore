@@ -3,3 +3,5 @@ __pycache__/
 *.bak
 .env
 .threshold_mode
+rotation_prompts/
+watcher_state.json

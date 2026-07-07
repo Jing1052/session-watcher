@@ -501,7 +501,12 @@ def wait_for_new_session_id(before_snapshot, old_session_id, started_at, timeout
             except OSError:
                 continue
             previous_mtime = before_snapshot.get(path)
-            if previous_mtime is None or mtime > previous_mtime + 0.001 or mtime >= started_at:
+            # 文件要么是本轮新增/被动过的，要么快照缺失（如 resolve 阶段传空快照）。
+            # 但无论哪种，都必须发生在 fresh session 启动之后——否则空快照会让
+            # 每个残留旧 session 都被 previous_mtime is None 命中，把 started_at 闸短路掉，
+            # 从而在 gap 里误认一个陈旧 jsonl 为新 session（2s 容差防时钟抖动）。
+            is_new_or_touched = previous_mtime is None or mtime > previous_mtime + 0.001
+            if is_new_or_touched and mtime >= started_at - 2:
                 session_id = os.path.basename(path).replace(".jsonl", "")
                 if session_id[:8] in ROTATED_SESSION_PREFIXES:
                     continue
