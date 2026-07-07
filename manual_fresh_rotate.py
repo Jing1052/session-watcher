@@ -324,14 +324,46 @@ def signal_watcher(pids, sig):
 
 
 # ---------------------------------------------------------------------------
+# 找「此刻在写的」当前 session
+# ---------------------------------------------------------------------------
+def find_current_session(explicit=None):
+    """手动场景专用：找此刻真正在写的 session。
+
+    刻意不走 watcher 的 find_active_session —— 那个会按 .rotated_* 历史标记过滤，
+    而手动换装就是要换「当前这个」，哪怕它以前被自动轮换标记过，也不该被跳过。
+    - explicit：命令行/env 显式给的 session id 或 .jsonl 路径，给了就认它。
+    - 否则：SESSIONS_DIR 里 mtime 最新的 *.jsonl（不按 rotated 过滤）。
+    """
+    if explicit:
+        if os.path.isfile(explicit):
+            return explicit
+        cand = os.path.join(sw.SESSIONS_DIR, f"{explicit}.jsonl")
+        if os.path.isfile(cand):
+            return cand
+        log.error(f"指定的 session 找不到: {explicit}")
+        return None
+    files = glob.glob(os.path.join(sw.SESSIONS_DIR, "*.jsonl"))
+    if not files:
+        return None
+    return max(files, key=os.path.getmtime)
+
+
+# ---------------------------------------------------------------------------
 async def main():
-    sw.load_rotated_markers()
-    session_file = sw.find_active_session()
+    explicit = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("MANUAL_SESSION", "")
+    log.info(f"在这个目录找 session: {sw.SESSIONS_DIR}")
+    session_file = find_current_session(explicit or None)
     if not session_file:
-        log.error("找不到活跃 session，放弃。")
+        log.error(f"在 {sw.SESSIONS_DIR} 里找不到任何 *.jsonl。")
+        log.error("→ 若目录不对：用 WATCHER_SESSIONS_DIR=/正确/session目录 覆盖（或 WATCHER_PROJECT_DIR=/项目cwd），")
+        log.error("→ 或直接把当前 session 的 id/路径当参数传：./manual_fresh_rotate.sh <session_id_or_path>")
         return 1
     old_session_id = os.path.basename(session_file).replace(".jsonl", "")
-    log.info(f"当前 session: {old_session_id[:8]}  ({session_file})")
+    try:
+        size = os.path.getsize(session_file)
+    except OSError:
+        size = 0
+    log.info(f"选中当前 session: {old_session_id[:8]}  ({size:,} 字节)  {session_file}")
 
     # 先挂起 watcher，避免它在本脚本动 tmux 的窗口里同时触发 --resume 轮换。
     watcher_pids = find_watcher_pids()
