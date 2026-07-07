@@ -136,6 +136,15 @@ def load_rotated_markers():
 
 
 def find_active_session():
+    # Priority: check watcher_state.json for current session first
+    state = read_watcher_state()
+    state_sid = (state.get("current_session_id") or "").strip()
+    if state_sid:
+        state_path = os.path.join(SESSIONS_DIR, f"{state_sid}.jsonl")
+        if os.path.exists(state_path):
+            return state_path
+
+    # Fallback: scan for newest non-rotated session
     pattern = os.path.join(SESSIONS_DIR, "*.jsonl")
     candidates = []
     for path in glob.glob(pattern):
@@ -399,6 +408,50 @@ def write_continuity_prompt(summary_text, transcript_tail_text, old_session_id):
 
 
 def _find_claude_pids():
+    """Find claude PIDs limited to our tmux session's process tree."""
+    try:
+        # Get the tmux pane's shell PID first
+        result = subprocess.run(
+            ["tmux", "list-panes", "-t", TMUX_SESSION, "-F", "#{pane_pid}"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            log.warning("_find_claude_pids: can't get tmux pane pid, falling back to global")
+            return _find_claude_pids_global()
+
+        pane_pid = int(result.stdout.strip().splitlines()[0])
+
+        # Find claude processes that are descendants of the pane shell
+        out = subprocess.check_output(
+            ["pgrep", "-u", str(os.getuid()), "-P", str(pane_pid), "-x", "claude"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip().splitlines()
+        pids = [int(p) for p in out if p]
+        if not pids:
+            # Also check grandchildren (pane_shell → bash → claude)
+            children = subprocess.check_output(
+                ["pgrep", "-P", str(pane_pid)],
+                stderr=subprocess.DEVNULL,
+            ).decode().strip().splitlines()
+            for child_pid in children:
+                try:
+                    grandkids = subprocess.check_output(
+                        ["pgrep", "-P", child_pid, "-x", "claude"],
+                        stderr=subprocess.DEVNULL,
+                    ).decode().strip().splitlines()
+                    pids.extend(int(p) for p in grandkids if p)
+                except subprocess.CalledProcessError:
+                    continue
+        return pids
+    except subprocess.CalledProcessError:
+        return []
+    except Exception as e:
+        log.warning(f"_find_claude_pids failed: {e}, falling back to global")
+        return _find_claude_pids_global()
+
+
+def _find_claude_pids_global():
+    """Fallback: find all claude PIDs for this user (old behavior)."""
     try:
         out = subprocess.check_output(
             ["pgrep", "-u", str(os.getuid()), "-x", "claude"],
@@ -408,7 +461,7 @@ def _find_claude_pids():
     except subprocess.CalledProcessError:
         return []
     except Exception as e:
-        log.warning(f"_find_claude_pids failed: {e}")
+        log.warning(f"_find_claude_pids_global failed: {e}")
         return []
 
 
