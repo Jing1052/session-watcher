@@ -4,4 +4,3 @@ __pycache__/
 .env
 .threshold_mode
 rotation_prompts/
-watcher_state.json
