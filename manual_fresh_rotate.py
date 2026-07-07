@@ -13,7 +13,9 @@ manual_fresh_rotate.py —— 手动把 CC 端的 Llaude 轮换到一个「全�
   想让新工具生效**时手动跑一次。跑失败也只是「这次没换成」，绝不会动到 watcher / 让我掉线。
 
 用法：
-    python3 manual_fresh_rotate.py          # 或 ./manual_fresh_rotate.sh
+    ./manual_fresh_rotate.sh --dry-run      # 空跑演练：只读、生成摘要给你看，绝不 kill/换/碰 watcher
+    ./manual_fresh_rotate.sh                # 真换
+    ./manual_fresh_rotate.sh <id_or_path>   # 指定要换哪个 session（不指定＝当前最新那个）
 
 流程：
   0. 先把后台 watcher 挂起（SIGSTOP），免得它和本脚本同时去动 tmux 打架；结束（含出错）
@@ -350,7 +352,11 @@ def find_current_session(explicit=None):
 
 # ---------------------------------------------------------------------------
 async def main():
-    explicit = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("MANUAL_SESSION", "")
+    args = sys.argv[1:]
+    dry_run = ("--dry-run" in args) or ("-n" in args) or bool(os.environ.get("MANUAL_DRY_RUN"))
+    positional = [a for a in args if not a.startswith("-")]
+    explicit = (positional[0] if positional else "") or os.environ.get("MANUAL_SESSION", "")
+
     log.info(f"在这个目录找 session: {sw.SESSIONS_DIR}")
     session_file = find_current_session(explicit or None)
     if not session_file:
@@ -365,7 +371,37 @@ async def main():
         size = 0
     log.info(f"选中当前 session: {old_session_id[:8]}  ({size:,} 字节)  {session_file}")
 
-    # 先挂起 watcher，避免它在本脚本动 tmux 的窗口里同时触发 --resume 轮换。
+    # --- 只读阶段：读对话、生成摘要、写注入文件。不动系统，dry-run 也走到这就停 ---
+    all_msgs = sw.extract_messages(session_file)
+    tail_msgs = read_tail_messages(session_file, MANUAL_TAIL_BYTES)
+    tail_n = len(tail_msgs)
+    to_summarize = all_msgs[:-tail_n] if tail_n else all_msgs
+    transcript_tail = _build_recent_context_text(tail_msgs)
+    log.info(f"消息总数={len(all_msgs)}；尾巴保留={tail_n} 条（≤{MANUAL_TAIL_BYTES:,} 字节）；待摘要={len(to_summarize)} 条")
+
+    summary = ""
+    if to_summarize:
+        conv = sw.build_conversation_text(to_summarize)
+        if conv.strip():
+            log.info("生成摘要中…")
+            summary = await sw.summarize(conv)
+            if summary:
+                log.info(f"摘要完成（{len(summary)} 字）")
+            else:
+                log.warning("摘要生成失败，仅靠原文尾巴承接")
+
+    prompt_file = write_continuity_prompt(summary, transcript_tail, old_session_id)
+
+    if dry_run:
+        log.info("=== DRY-RUN 空跑演练：到此为止 —— 没 kill、没起新 claude、没碰 watcher ===")
+        log.info(f"注入文件已生成，可打开预览：{prompt_file}")
+        preview = (summary or transcript_tail or "")[:600]
+        log.info("醒来会读到的开头预览（前 600 字）：\n" + preview)
+        log.info(f"演练 OK。真换请去掉 --dry-run 再跑一次。（本次保留了最近 {tail_n} 条原文）")
+        print("dry-run-ok")
+        return 0
+
+    # --- 真换阶段：先挂起 watcher（防同抢 tmux），出错也必恢复 ---
     watcher_pids = find_watcher_pids()
     if watcher_pids:
         log.info(f"挂起后台 watcher pids={watcher_pids}（SIGSTOP）")
@@ -374,32 +410,8 @@ async def main():
         log.info("没检测到后台 watcher（没关系，继续）")
 
     try:
-        # 1. 摘要更早部分 + 留最近原文尾巴
-        all_msgs = sw.extract_messages(session_file)
-        tail_msgs = read_tail_messages(session_file, MANUAL_TAIL_BYTES)
-        tail_n = len(tail_msgs)
-        to_summarize = all_msgs[:-tail_n] if tail_n else all_msgs
-        transcript_tail = _build_recent_context_text(tail_msgs)
-        log.info(f"消息总数={len(all_msgs)}；尾巴保留={tail_n} 条（≤{MANUAL_TAIL_BYTES:,} 字节）；待摘要={len(to_summarize)} 条")
-
-        summary = ""
-        if to_summarize:
-            conv = sw.build_conversation_text(to_summarize)
-            if conv.strip():
-                log.info("生成摘要中…")
-                summary = await sw.summarize(conv)
-                if summary:
-                    log.info(f"摘要完成（{len(summary)} 字）")
-                else:
-                    log.warning("摘要生成失败，仅靠原文尾巴承接")
-
-        prompt_file = write_continuity_prompt(summary, transcript_tail, old_session_id)
-
-        # 2. 关旧 claude（限定 pane）
-        kill_old_claude()
-
-        # 3. 起全新 session + 注入
-        new_id = start_fresh(prompt_file, old_session_id)
+        kill_old_claude()                                    # 关旧 claude（限定 pane）
+        new_id = start_fresh(prompt_file, old_session_id)    # 起全新 session + 注入
     finally:
         # 无论成败，一定把 watcher 叫醒——绝不把它永久挂起（那才是致命的）。
         if watcher_pids:
