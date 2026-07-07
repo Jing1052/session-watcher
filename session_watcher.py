@@ -61,6 +61,9 @@ STATE_FILE = os.environ.get(
     "WATCHER_STATE_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "watcher_state.json"),
 )
+# pending 探测挂太久（fresh session 迟迟没落地 jsonl，可能是 claude 没起来）时的兜底：
+# 超过这个秒数就放弃 pending、恢复正常巡逻，绝不让 watcher 无声卡死停摆。
+PENDING_TIMEOUT = float(os.environ.get("WATCHER_PENDING_TIMEOUT", 300))
 
 SUMMARY_API_KEY = os.environ.get("WATCHER_SUMMARY_API_KEY", "")
 SUMMARY_BASE_URL = os.environ.get("WATCHER_SUMMARY_BASE_URL", "https://api.deepseek.com/v1")
@@ -322,6 +325,11 @@ def write_json_atomic(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
     os.replace(tmp, path)
+    # state 里带 session id / 路径，收紧成仅本人可读写。
+    try:
+        os.chmod(path, 0o600)
+    except OSError as e:
+        log.warning(f"chmod {path} failed: {e}")
 
 
 def read_watcher_state():
@@ -365,6 +373,11 @@ def mark_rotated(old_session_id, new_session_id, prompt_file):
 
 def write_continuity_prompt(summary_text, transcript_tail_text, old_session_id):
     os.makedirs(ROTATION_PROMPT_DIR, exist_ok=True)
+    # 目录里躺着私密摘要 + transcript 尾巴，收紧成仅本人可访问。
+    try:
+        os.chmod(ROTATION_PROMPT_DIR, 0o700)
+    except OSError as e:
+        log.warning(f"chmod {ROTATION_PROMPT_DIR} failed: {e}")
     prompt = CONTINUITY_PROMPT_TEMPLATE.format(
         summary=(summary_text or "（摘要不可用，本轮只依赖下面的 transcript 尾巴承接。）").strip(),
         transcript_tail=(transcript_tail_text or "（没有可保留的 transcript 尾巴）").strip(),
@@ -377,6 +390,10 @@ def write_continuity_prompt(summary_text, transcript_tail_text, old_session_id):
     )
     with open(prompt_file, "w", encoding="utf-8") as f:
         f.write(prompt)
+    try:
+        os.chmod(prompt_file, 0o600)
+    except OSError as e:
+        log.warning(f"chmod {prompt_file} failed: {e}")
     log.info(f"Wrote continuity prompt: {prompt_file} ({len(prompt.encode('utf-8')):,} bytes)")
     return prompt_file
 
@@ -528,6 +545,21 @@ def resolve_pending_session_id():
     before = {}
     new_session_id = wait_for_new_session_id(before, old_session_id, started_at, timeout=1)
     if not new_session_id:
+        # 兜底：pending 挂超过 PENDING_TIMEOUT（fresh session 一直没落地，claude 可能没起来）
+        # 就别再无限傻等——清掉 pending、恢复正常巡逻，让 watcher 自己爬起来继续干活。
+        if started_at and (time.time() - started_at) > PENDING_TIMEOUT:
+            log.warning(
+                f"Fresh session id still pending after {PENDING_TIMEOUT:.0f}s — "
+                f"clearing pending and resuming patrol (claude may have failed to start)"
+            )
+            write_watcher_state(
+                old_session_id,
+                "",
+                str(state.get("continuity_prompt_file") or ""),
+                fresh_started_at=started_at,
+                pending=False,
+            )
+            return False
         log.debug("Fresh session id still pending")
         return True
 
