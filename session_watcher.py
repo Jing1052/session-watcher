@@ -421,18 +421,27 @@ def _find_claude_pids():
 
         pane_pid = int(result.stdout.strip().splitlines()[0])
 
-        # Find claude processes that are descendants of the pane shell
-        out = subprocess.check_output(
-            ["pgrep", "-u", str(os.getuid()), "-P", str(pane_pid), "-x", "claude"],
-            stderr=subprocess.DEVNULL,
-        ).decode().strip().splitlines()
-        pids = [int(p) for p in out if p]
-        if not pids:
-            # Also check grandchildren (pane_shell → bash → claude)
-            children = subprocess.check_output(
-                ["pgrep", "-P", str(pane_pid)],
+        # claude 作为 pane shell 的直接子进程（最常见）。
+        # pgrep 无匹配会以返回码 1 抛 CalledProcessError；这里必须局部吞掉、置空，
+        # 否则它会冒泡到外层 except 直接 return []，让下面的孙子进程兜底变成死代码，
+        # 结果是 claude 被 env/wrapper 多套一层时漏杀（旧 claude 不死＝致命点）。
+        try:
+            out = subprocess.check_output(
+                ["pgrep", "-u", str(os.getuid()), "-P", str(pane_pid), "-x", "claude"],
                 stderr=subprocess.DEVNULL,
             ).decode().strip().splitlines()
+            pids = [int(p) for p in out if p]
+        except subprocess.CalledProcessError:
+            pids = []
+        if not pids:
+            # Also check grandchildren (pane_shell → bash → claude)
+            try:
+                children = subprocess.check_output(
+                    ["pgrep", "-P", str(pane_pid)],
+                    stderr=subprocess.DEVNULL,
+                ).decode().strip().splitlines()
+            except subprocess.CalledProcessError:
+                children = []
             for child_pid in children:
                 try:
                     grandkids = subprocess.check_output(
